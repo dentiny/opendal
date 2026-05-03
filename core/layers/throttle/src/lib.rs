@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Throttle layer implementation for Apache OpenDAL.
-
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(missing_docs)]
 
@@ -31,13 +29,34 @@ use governor::state::InMemoryState;
 use governor::state::NotKeyed;
 use opendal_core::raw::*;
 use opendal_core::*;
+use opendal_layer_throttle_base as base;
+
+/// Share an atomic [`RateLimiter`] instance across all threads in one operator.
+type SharedRateLimiter =
+    Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>>;
+
+/// Newtype around a `governor` [`RateLimiter`] so we can implement the
+/// [`base::ThrottleRateLimiter`] trait without violating the orphan rule.
+#[derive(Clone)]
+pub struct GovernorRateLimiter(SharedRateLimiter);
+
+impl base::ThrottleRateLimiter for GovernorRateLimiter {
+    async fn until_n_ready(&self, n: NonZeroU32) -> Result<()> {
+        self.0.as_ref().until_n_ready(n).await.map_err(|_| {
+            Error::new(
+                ErrorKind::RateLimited,
+                "burst size is smaller than the request size",
+            )
+        })
+    }
+}
 
 /// Add a bandwidth rate limiter to the underlying services.
 ///
 /// # Throttle
 ///
-/// There are several algorithms when it come to rate limiting techniques.
-/// This throttle layer uses Generic Cell Rate Algorithm (GCRA) provided by
+/// There are several algorithms when it comes to rate limiting techniques.
+/// This throttle layer uses the Generic Cell Rate Algorithm (GCRA) provided by
 /// [Governor](https://docs.rs/governor/latest/governor/index.html).
 /// By setting the `bandwidth` and `burst`, we can control the byte flow rate of underlying services.
 ///
@@ -46,7 +65,7 @@ use opendal_core::*;
 /// When setting the ThrottleLayer, always consider the largest possible operation size as the burst size,
 /// as **the burst size should be larger than any possible byte length to allow it to pass through**.
 ///
-/// Read more about [Quota](https://docs.rs/governor/latest/governor/struct.Quota.html#examples)
+/// Read more about [Quota](https://docs.rs/governor/latest/governor/struct.Quota.html#examples).
 ///
 /// # Examples
 ///
@@ -68,8 +87,7 @@ use opendal_core::*;
 /// ```
 #[derive(Clone)]
 pub struct ThrottleLayer {
-    bandwidth: NonZeroU32,
-    burst: NonZeroU32,
+    rate_limiter: GovernorRateLimiter,
 }
 
 impl ThrottleLayer {
@@ -80,130 +98,19 @@ impl ThrottleLayer {
     pub fn new(bandwidth: u32, burst: u32) -> Self {
         assert!(bandwidth > 0);
         assert!(burst > 0);
-        Self {
-            bandwidth: NonZeroU32::new(bandwidth).unwrap(),
-            burst: NonZeroU32::new(burst).unwrap(),
-        }
+        let bandwidth = NonZeroU32::new(bandwidth).unwrap();
+        let burst = NonZeroU32::new(burst).unwrap();
+        let rate_limiter = GovernorRateLimiter(Arc::new(RateLimiter::direct(
+            Quota::per_second(bandwidth).allow_burst(burst),
+        )));
+        Self { rate_limiter }
     }
 }
 
 impl<A: Access> Layer<A> for ThrottleLayer {
-    type LayeredAccess = ThrottleAccessor<A>;
+    type LayeredAccess = base::ThrottleAccessor<A, GovernorRateLimiter>;
 
     fn layer(&self, inner: A) -> Self::LayeredAccess {
-        let rate_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(self.bandwidth).allow_burst(self.burst),
-        ));
-        ThrottleAccessor {
-            inner,
-            rate_limiter,
-        }
-    }
-}
-
-/// Share an atomic RateLimiter instance across all threads in one operator.
-/// If want to add more observability in the future, replace the default NoOpMiddleware with other middleware types.
-/// Read more about [Middleware](https://docs.rs/governor/latest/governor/middleware/index.html)
-type SharedRateLimiter = Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>>;
-
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct ThrottleAccessor<A: Access> {
-    inner: A,
-    rate_limiter: SharedRateLimiter,
-}
-
-impl<A: Access> LayeredAccess for ThrottleAccessor<A> {
-    type Inner = A;
-    type Reader = ThrottleWrapper<A::Reader>;
-    type Writer = ThrottleWrapper<A::Writer>;
-    type Lister = A::Lister;
-    type Deleter = A::Deleter;
-
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
-    }
-
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        let limiter = self.rate_limiter.clone();
-
-        self.inner
-            .read(path, args)
-            .await
-            .map(|(rp, r)| (rp, ThrottleWrapper::new(r, limiter)))
-    }
-
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-        let limiter = self.rate_limiter.clone();
-
-        self.inner
-            .write(path, args)
-            .await
-            .map(|(rp, w)| (rp, ThrottleWrapper::new(w, limiter)))
-    }
-
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        self.inner.delete().await
-    }
-
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-        self.inner.list(path, args).await
-    }
-}
-
-#[doc(hidden)]
-pub struct ThrottleWrapper<R> {
-    inner: R,
-    limiter: SharedRateLimiter,
-}
-
-impl<R> ThrottleWrapper<R> {
-    fn new(inner: R, rate_limiter: SharedRateLimiter) -> Self {
-        Self {
-            inner,
-            limiter: rate_limiter,
-        }
-    }
-}
-
-impl<R: oio::Read> oio::Read for ThrottleWrapper<R> {
-    async fn read(&mut self) -> Result<Buffer> {
-        self.inner.read().await
-    }
-}
-
-impl<R: oio::Write> oio::Write for ThrottleWrapper<R> {
-    async fn write(&mut self, bs: Buffer) -> Result<()> {
-        let len = bs.len();
-        if len == 0 {
-            return self.inner.write(bs).await;
-        }
-
-        if len > u32::MAX as usize {
-            return Err(Error::new(
-                ErrorKind::RateLimited,
-                "request size exceeds throttle quota capacity",
-            ));
-        }
-
-        let buf_length =
-            NonZeroU32::new(len as u32).expect("len is non-zero so NonZeroU32 must exist");
-
-        self.limiter.until_n_ready(buf_length).await.map_err(|_| {
-            Error::new(
-                ErrorKind::RateLimited,
-                "burst size is smaller than the request size",
-            )
-        })?;
-
-        self.inner.write(bs).await
-    }
-
-    async fn abort(&mut self) -> Result<()> {
-        self.inner.abort().await
-    }
-
-    async fn close(&mut self) -> Result<Metadata> {
-        self.inner.close().await
+        base::ThrottleLayer::new(self.rate_limiter.clone()).layer(inner)
     }
 }

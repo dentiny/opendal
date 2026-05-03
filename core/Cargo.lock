@@ -6096,6 +6096,7 @@ dependencies = [
  "opendal-layer-route",
  "opendal-layer-tail-cut",
  "opendal-layer-throttle",
+ "opendal-layer-throttle-base",
  "opendal-layer-timeout",
  "opendal-layer-tracing",
  "opendal-service-aliyun-drive",
@@ -6490,6 +6491,14 @@ name = "opendal-layer-throttle"
 version = "0.56.0"
 dependencies = [
  "governor",
+ "opendal-core",
+ "opendal-layer-throttle-base",
+]
+
+[[package]]
+name = "opendal-layer-throttle-base"
+version = "0.56.0"
+dependencies = [
  "opendal-core",
 ]
 

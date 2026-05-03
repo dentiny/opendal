@@ -235,6 +235,7 @@ opendal-layer-retry = { path = "layers/retry", version = "0.56.0", optional = tr
 opendal-layer-route = { path = "layers/route", version = "0.56.0", optional = true, default-features = false }
 opendal-layer-tail-cut = { path = "layers/tail-cut", version = "0.56.0", optional = true, default-features = false }
 opendal-layer-throttle = { path = "layers/throttle", version = "0.56.0", optional = true, default-features = false }
+opendal-layer-throttle-base = { path = "layers/throttle-base", version = "0.56.0", optional = true, default-features = false }
 opendal-layer-timeout = { path = "layers/timeout", version = "0.56.0", optional = true, default-features = false }
 opendal-layer-tracing = { path = "layers/tracing", version = "0.56.0", optional = true, default-features = false }
 opendal-service-aliyun-drive = { path = "services/aliyun-drive", version = "0.56.0", optional = true, default-features = false }

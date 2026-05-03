@@ -16,8 +16,8 @@
 # under the License.
 
 [package]
-description = "Apache OpenDAL throttle layer"
-name = "opendal-layer-throttle"
+description = "Apache OpenDAL throttle layer base components"
+name = "opendal-layer-throttle-base"
 
 authors = { workspace = true }
 edition = { workspace = true }
@@ -31,9 +31,4 @@ version = { workspace = true }
 all-features = true
 
 [dependencies]
-governor = "0.10.4"
 opendal-core = { path = "../../core", version = "0.56.0", default-features = false }
-opendal-layer-throttle-base = { path = "../throttle-base", version = "0.56.0", default-features = false }
-
-[dev-dependencies]
-opendal-core = { path = "../../core", version = "0.56.0" }
