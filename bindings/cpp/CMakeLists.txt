@@ -167,7 +167,7 @@ endif()
 
 # Platform-specific test configuration
 if(WIN32)
-    target_link_libraries(opendal_cpp userenv ws2_32 bcrypt)
+    target_link_libraries(opendal_cpp PRIVATE userenv ws2_32 bcrypt)
     set_target_properties(
             opendal_cpp
             PROPERTIES
