@@ -57,7 +57,13 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
           ghcup install ghc 9.4.8 --set
           ghcup install cabal --set
-          cabal update
+          mkdir -p "${HOME}/.cabal"
+          cat > "${HOME}/.cabal/config" <<'EOF'
+          repository hackage.haskell.org
+            url: https://hackage.haskell.org/
+            secure: True
+          EOF
+          cabal update --ignore-project
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup
       # Useful for debugging
@@ -118,7 +124,13 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
           ghcup install ghc 9.2.8 --set
           ghcup install cabal --set
-          cabal update
+          mkdir -p "${HOME}/.cabal"
+          cat > "${HOME}/.cabal/config" <<'EOF'
+          repository hackage.haskell.org
+            url: https://hackage.haskell.org/
+            secure: True
+          EOF
+          cabal update --ignore-project
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup
       - name: Restore haskell cache
