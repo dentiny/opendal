@@ -28,6 +28,8 @@ use backon::Retryable;
 use opendal_core::raw::*;
 use opendal_core::*;
 
+mod backoff;
+
 /// `RetryLayer` retries temporarily failed operations.
 ///
 /// # Notes
@@ -244,7 +246,7 @@ pub struct RetryEvent<'a> {
     pub attempt: u32,
 }
 
-/// RetryInterceptor observes retry attempts before the retry sleep.
+/// RetryInterceptor adjusts retry delays and observes scheduled retry attempts.
 pub trait RetryInterceptor: Send + Sync + 'static {
     /// Called before each retry sleep.
     ///
@@ -253,6 +255,19 @@ pub trait RetryInterceptor: Send + Sync + 'static {
     /// The intercept must be quick and non-blocking. No heavy IO is
     /// allowed. Otherwise, the retry will be blocked.
     fn intercept(&self, event: RetryEvent<'_>);
+
+    /// Adjust the delay for an otherwise eligible retry.
+    ///
+    /// The event contains the exponential backoff delay and the next attempt
+    /// number. Return `None` to stop retrying or `Some(delay)` to wait before
+    /// retrying. This hook cannot extend an exhausted retry budget or retry a
+    /// non-temporary error. `intercept` receives the adjusted delay only when
+    /// another attempt will occur. The default preserves exponential backoff.
+    ///
+    /// This hook must be quick and non-blocking, like `intercept`.
+    fn retry_delay(&self, event: RetryEvent<'_>) -> Option<Duration> {
+        Some(event.retry_after)
+    }
 }
 
 impl<F> RetryInterceptor for F
@@ -319,9 +334,11 @@ impl<I: RetryInterceptor> Service for RetryService<I> {
         args: OpCreateDir,
     ) -> Result<RpCreateDir> {
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::CreateDir);
         { || self.inner.create_dir(ctx, path, args.clone()) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -337,9 +354,11 @@ impl<I: RetryInterceptor> Service for RetryService<I> {
 
     fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Read);
         let reader = { || self.inner.read(ctx, path, args.clone()) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -357,9 +376,11 @@ impl<I: RetryInterceptor> Service for RetryService<I> {
 
     fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Write);
         let writer = { || self.inner.write(ctx, path, args.clone()) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -377,9 +398,11 @@ impl<I: RetryInterceptor> Service for RetryService<I> {
 
     async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Stat);
         { || self.inner.stat(ctx, path, args.clone()) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -395,9 +418,11 @@ impl<I: RetryInterceptor> Service for RetryService<I> {
 
     fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Delete);
         let deleter = { || self.inner.delete(ctx) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -425,9 +450,11 @@ impl<I: RetryInterceptor> Service for RetryService<I> {
         args: OpCopy,
     ) -> Result<Self::Copier> {
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Copy);
         let copier = { || self.inner.copy(ctx, from, to, args.clone()) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -451,9 +478,11 @@ impl<I: RetryInterceptor> Service for RetryService<I> {
         args: OpRename,
     ) -> Result<RpRename> {
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Rename);
         { || self.inner.rename(ctx, from, to, args.clone()) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -474,9 +503,11 @@ impl<I: RetryInterceptor> Service for RetryService<I> {
         args: OpRestore,
     ) -> Result<RpRestore> {
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Restore);
         { || self.inner.restore(ctx, path, args.clone()) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -492,9 +523,11 @@ impl<I: RetryInterceptor> Service for RetryService<I> {
 
     fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::List);
         let lister = { || self.inner.list(ctx, path, args.clone()) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -517,9 +550,11 @@ impl<I: RetryInterceptor> Service for RetryService<I> {
         args: OpPresign,
     ) -> Result<RpPresign> {
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Presign);
         { || self.inner.presign(ctx, path, args.clone()) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -556,9 +591,11 @@ impl<R: oio::Read + 'static, I: RetryInterceptor> oio::Read for RetryReader<R, I
         use backon::Retryable;
 
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Read);
         let (rp, stream) = { || self.inner.open(range) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -587,9 +624,11 @@ impl<R: oio::Read + 'static, I: RetryInterceptor> oio::Read for RetryReader<R, I
         use backon::Retryable;
 
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Read);
         { || self.inner.read(range) }
-            .retry(self.builder)
-            .when(|e| e.is_temporary())
+            .retry(backoff)
+            .when(retryable)
             .notify(|err, dur| {
                 attempt += 1;
                 self.notify.intercept(RetryEvent {
@@ -642,6 +681,8 @@ impl<R: oio::Read, I: RetryInterceptor> oio::ReadStream for RetryReadStream<R, I
         let range = self.range;
         let read = self.read;
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Read);
 
         let ((stream, range, read), res) = {
             |(stream, mut range, mut read): (
@@ -684,8 +725,8 @@ impl<R: oio::Read, I: RetryInterceptor> oio::ReadStream for RetryReadStream<R, I
                 }
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context((stream, range, read))
         .notify(|err, dur| {
             attempt += 1;
@@ -739,6 +780,8 @@ impl<R: oio::ReadStream, I: RetryInterceptor> oio::ReadStream for RetryWrapper<R
 
         let inner = self.take_inner()?;
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Read);
 
         let (inner, res) = {
             |mut r: R| async move {
@@ -747,8 +790,8 @@ impl<R: oio::ReadStream, I: RetryInterceptor> oio::ReadStream for RetryWrapper<R
                 (r, res)
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context(inner)
         .notify(|err, dur| {
             attempt += 1;
@@ -772,6 +815,8 @@ impl<R: oio::Write, I: RetryInterceptor> oio::Write for RetryWrapper<R, I> {
 
         let inner = self.take_inner()?;
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Write);
 
         let ((inner, _), res) = {
             |(mut r, bs): (R, Buffer)| async move {
@@ -780,8 +825,8 @@ impl<R: oio::Write, I: RetryInterceptor> oio::Write for RetryWrapper<R, I> {
                 ((r, bs), res)
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context((inner, bs))
         .notify(|err, dur| {
             attempt += 1;
@@ -804,6 +849,8 @@ impl<R: oio::Write, I: RetryInterceptor> oio::Write for RetryWrapper<R, I> {
         let inner = self.take_inner()?;
         let path = path.to_string();
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Write);
 
         let ((inner, _, _, _), res) = {
             |(mut r, path, args, range): (R, String, OpRead, BytesRange)| async move {
@@ -812,8 +859,8 @@ impl<R: oio::Write, I: RetryInterceptor> oio::Write for RetryWrapper<R, I> {
                 ((r, path, args, range), res)
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context((inner, path, args, range))
         .notify(|err, dur| {
             attempt += 1;
@@ -835,6 +882,8 @@ impl<R: oio::Write, I: RetryInterceptor> oio::Write for RetryWrapper<R, I> {
 
         let inner = self.take_inner()?;
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Write);
 
         let (inner, res) = {
             |mut r: R| async move {
@@ -843,8 +892,8 @@ impl<R: oio::Write, I: RetryInterceptor> oio::Write for RetryWrapper<R, I> {
                 (r, res)
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context(inner)
         .notify(|err, dur| {
             attempt += 1;
@@ -866,6 +915,8 @@ impl<R: oio::Write, I: RetryInterceptor> oio::Write for RetryWrapper<R, I> {
 
         let inner = self.take_inner()?;
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Write);
 
         let (inner, res) = {
             |mut r: R| async move {
@@ -874,8 +925,8 @@ impl<R: oio::Write, I: RetryInterceptor> oio::Write for RetryWrapper<R, I> {
                 (r, res)
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context(inner)
         .notify(|err, dur| {
             attempt += 1;
@@ -899,6 +950,8 @@ impl<P: oio::List, I: RetryInterceptor> oio::List for RetryWrapper<P, I> {
 
         let inner = self.take_inner()?;
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::List);
 
         let (inner, res) = {
             |mut p: P| async move {
@@ -907,8 +960,8 @@ impl<P: oio::List, I: RetryInterceptor> oio::List for RetryWrapper<P, I> {
                 (p, res)
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context(inner)
         .notify(|err, dur| {
             attempt += 1;
@@ -934,6 +987,8 @@ impl<P: oio::Delete, I: RetryInterceptor> oio::Delete for RetryWrapper<P, I> {
         let path = path.to_string();
         let args_cloned = args.clone();
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Delete);
 
         let (inner, res) = {
             |mut p: P| {
@@ -945,8 +1000,8 @@ impl<P: oio::Delete, I: RetryInterceptor> oio::Delete for RetryWrapper<P, I> {
                 }
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context(inner)
         .notify(|err, dur| {
             attempt += 1;
@@ -968,6 +1023,8 @@ impl<P: oio::Delete, I: RetryInterceptor> oio::Delete for RetryWrapper<P, I> {
 
         let inner = self.take_inner()?;
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Delete);
 
         let (inner, res) = {
             |mut p: P| async move {
@@ -976,8 +1033,8 @@ impl<P: oio::Delete, I: RetryInterceptor> oio::Delete for RetryWrapper<P, I> {
                 (p, res)
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context(inner)
         .notify(|err, dur| {
             attempt += 1;
@@ -1001,6 +1058,8 @@ impl<C: oio::Copy, I: RetryInterceptor> oio::Copy for RetryWrapper<C, I> {
 
         let inner = self.take_inner()?;
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Copy);
 
         let (inner, res) = {
             |mut c: C| async move {
@@ -1009,8 +1068,8 @@ impl<C: oio::Copy, I: RetryInterceptor> oio::Copy for RetryWrapper<C, I> {
                 (c, res)
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context(inner)
         .notify(|err, dur| {
             attempt += 1;
@@ -1032,6 +1091,8 @@ impl<C: oio::Copy, I: RetryInterceptor> oio::Copy for RetryWrapper<C, I> {
 
         let inner = self.take_inner()?;
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Copy);
 
         let (inner, res) = {
             |mut c: C| async move {
@@ -1040,8 +1101,8 @@ impl<C: oio::Copy, I: RetryInterceptor> oio::Copy for RetryWrapper<C, I> {
                 (c, res)
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context(inner)
         .notify(|err, dur| {
             attempt += 1;
@@ -1063,6 +1124,8 @@ impl<C: oio::Copy, I: RetryInterceptor> oio::Copy for RetryWrapper<C, I> {
 
         let inner = self.take_inner()?;
         let mut attempt: u32 = 0;
+        let (backoff, retryable) =
+            backoff::prepare(self.builder, self.notify.clone(), Operation::Copy);
 
         let (inner, res) = {
             |mut c: C| async move {
@@ -1071,8 +1134,8 @@ impl<C: oio::Copy, I: RetryInterceptor> oio::Copy for RetryWrapper<C, I> {
                 (c, res)
             }
         }
-        .retry(self.builder)
-        .when(|e| e.is_temporary())
+        .retry(backoff)
+        .when(retryable)
         .context(inner)
         .notify(|err, dur| {
             attempt += 1;
